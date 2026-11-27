@@ -1,39 +1,60 @@
 """Twilio WhatsApp webhook endpoint.
 
-Security layers:
-1. Twilio request signature validation (X-Twilio-Signature header)
-2. Optional shared-secret token in URL query param (?token=...)
-3. All DB operations are scoped to the authenticated business (by phone)
+Security model (in order of execution)
+---------------------------------------
+1. Shared-secret URL token (?token=...) — cheap first gate, eliminates scanners
+2. Twilio HMAC-SHA1 signature (X-Twilio-Signature) — cryptographic proof from Twilio
+3. Business lookup by phone — ensures the sender is a registered tenant
 
-Twilio sends multipart/form-data POST requests to this endpoint.
-We MUST reply with HTTP 200 quickly (< 5s) or Twilio will retry.
-Heavy work (LLM, DB) is awaited but the timeout is handled gracefully.
+Both checks (1) and (2) must pass before any body is parsed or processed.
+Rejections always return HTTP 200 to prevent Twilio from retrying,
+but the agent and DB are never reached.
+
+Response strategy
+-----------------
+Twilio requires HTTP 200 within ~15 seconds or it retries.
+We return 200 immediately after validation and send the reply as a
+separate outbound API call. This decouples reply latency from HTTP latency.
 """
 
-import logging
 import asyncio
-from typing import Annotated
+import logging
 
-from fastapi import APIRouter, Request, HTTPException, Query, status, Form
+from fastapi import APIRouter, Query, Request, status
 from fastapi.responses import Response
 
 from app.core.config import settings
 from app.services.twilio_whatsapp import (
-    validate_twilio_signature,
+    download_media,
     parse_twilio_webhook,
     send_text_reply,
+    validate_twilio_signature,
 )
 from app.services.agent import handle_message
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
-# Twilio expects a TwiML or plain 200 response — we return 200 with no body
-# and send the reply as a separate outbound message via the REST API.
-# This avoids the 5-second reply window constraint for complex operations.
+AGENT_TIMEOUT_SECONDS = 25  # Render Free tier can be slow; stay inside 30 s
 
-AGENT_TIMEOUT_SECONDS = 25  # Render Free can be slow; stay under 30s
+
+def _reconstruct_url(request: Request, token: str) -> str:
+    """
+    Rebuild the full URL that Twilio signed.
+
+    Twilio signs the URL it POSTed to, including any query parameters.
+    On Render (behind a TLS proxy), the forwarded headers carry the real
+    public scheme and host. We must reproduce these exactly or validation fails.
+    """
+    proto = request.headers.get("X-Forwarded-Proto") or "https"
+    host  = (
+        request.headers.get("X-Forwarded-Host")
+        or request.headers.get("host")
+        or "localhost"
+    )
+    path  = request.url.path
+    query = f"?token={token}" if token else ""
+    return f"{proto}://{host}{path}{query}"
 
 
 @router.post(
@@ -44,59 +65,60 @@ AGENT_TIMEOUT_SECONDS = 25  # Render Free can be slow; stay under 30s
 )
 async def twilio_whatsapp_incoming(
     request: Request,
-    token: str = Query(default="", description="Shared secret for extra security"),
-):
+    token: str = Query(default="", description="Shared-secret token"),
+) -> Response:
     """
-    Receives incoming WhatsApp messages forwarded by Twilio.
+    Receives and processes incoming WhatsApp messages from Twilio.
 
-    Security:
-    - Validates X-Twilio-Signature against TWILIO_AUTH_TOKEN
-    - Optionally validates ?token= query param against TWILIO_WEBHOOK_SECRET
-
-    After validation, hands off to the agent and replies via outbound API.
-    Always returns 200 so Twilio doesn't retry.
+    Validation order:
+    1. Shared-secret token check
+    2. Body parsing (needed to build the form dict for HMAC)
+    3. Twilio HMAC-SHA1 signature check
+    4. Agent execution with timeout
+    5. Outbound reply via Twilio REST API
     """
 
-    # ── 1. Optional shared-secret token check ────────────────────────────
-    if settings.TWILIO_WEBHOOK_SECRET and token != settings.TWILIO_WEBHOOK_SECRET:
-        logger.warning("Twilio webhook: invalid shared-secret token.")
-        # Return 200 to avoid Twilio retries leaking info, but do nothing
-        return Response(status_code=200)
+    # ── 1. Shared-secret token check ──────────────────────────────────────────
+    # Only enforced when TWILIO_WEBHOOK_SECRET is configured.
+    # An empty token from an attacker will fail this gate.
+    if settings.TWILIO_WEBHOOK_SECRET:
+        if not token or token != settings.TWILIO_WEBHOOK_SECRET:
+            token_preview = repr(token)[:10]
+            logger.warning(
+                f"Twilio webhook: shared-secret token mismatch "
+                f"(got {token_preview}). Silently dropping."
+            )
+            return Response(status_code=200)
 
-    # ── 2. Parse form data ────────────────────────────────────────────────
+    # ── 2. Parse form body ─────────────────────────────────────────────────────
+    # Must happen before HMAC check because the validator needs the form fields.
     try:
         form = dict(await request.form())
     except Exception as exc:
-        logger.error(f"Failed to parse Twilio form data: {exc}")
+        logger.error(f"Twilio webhook: failed to parse form body: {exc}")
         return Response(status_code=200)
 
-    # ── 3. Twilio signature validation ────────────────────────────────────
+    # ── 3. Twilio HMAC-SHA1 signature check ───────────────────────────────────
     signature = request.headers.get("X-Twilio-Signature", "")
+    full_url  = _reconstruct_url(request, token)
 
-    # Reconstruct the full URL as Twilio signed it
-    # On Render, the host header reflects the public URL
-    proto  = request.headers.get("X-Forwarded-Proto", "https")
-    host   = request.headers.get("X-Forwarded-Host") or request.headers.get("host", "")
-    path   = request.url.path
-    # Include the token query param in the URL if present (Twilio signs the full URL)
-    query  = f"?token={token}" if token else ""
-    full_url = f"{proto}://{host}{path}{query}"
-
-    if not validate_twilio_signature(full_url, dict(form), signature):
-        logger.warning(f"Twilio signature validation failed for {full_url}")
-        # Still return 200 — don't expose validation failures via status codes
+    if not validate_twilio_signature(full_url, form, signature):
+        # validate_twilio_signature already logs the reason.
         return Response(status_code=200)
 
-    # ── 4. Parse the message ──────────────────────────────────────────────
+    # ── 4. Parse the message ───────────────────────────────────────────────────
     try:
         msg = parse_twilio_webhook(form)
     except Exception as exc:
-        logger.error(f"Failed to parse Twilio message: {exc}")
+        logger.error(f"Twilio webhook: failed to parse message: {exc}")
         return Response(status_code=200)
 
-    logger.info(f"Twilio WA in: from={msg.from_number} type={msg.msg_type} body={msg.body[:60]!r}")
+    logger.info(
+        f"Twilio WA in: from={msg.from_number!r} "
+        f"type={msg.msg_type!r} body={msg.body[:60]!r}"
+    )
 
-    # ── 5. Run agent with timeout ─────────────────────────────────────────
+    # ── 5. Run agent with hard timeout ─────────────────────────────────────────
     try:
         reply = await asyncio.wait_for(
             handle_message(msg),
@@ -105,20 +127,19 @@ async def twilio_whatsapp_incoming(
     except asyncio.TimeoutError:
         logger.error(f"Agent timed out for {msg.from_number}")
         reply = (
-            "⏳ That took too long to process. Please try again.\n"
-            "If the problem persists, try a simpler message."
+            "⏳ That took too long. Please try again.\n"
+            "If this keeps happening, try a simpler message."
         )
     except Exception as exc:
-        logger.exception(f"Agent error for {msg.from_number}: {exc}")
-        reply = "⚠️ Something went wrong. Please try again in a moment."
+        logger.exception(f"Agent unhandled error for {msg.from_number}: {exc}")
+        reply = "⚠️ Something went wrong on my end. Please try again."
 
-    # ── 6. Send reply ─────────────────────────────────────────────────────
+    # ── 6. Send reply ──────────────────────────────────────────────────────────
     if reply:
         sent = send_text_reply(msg.from_number, reply)
         if not sent:
-            logger.error(f"Failed to send reply to {msg.from_number}")
+            logger.error(f"Failed to send Twilio reply to {msg.from_number}")
 
-    # Always 200 — Twilio must not retry
     return Response(status_code=200)
 
 
@@ -127,11 +148,13 @@ async def twilio_whatsapp_incoming(
     summary="Twilio webhook health check",
     tags=["Webhooks"],
 )
-async def twilio_whatsapp_health():
-    """Simple GET endpoint to verify Twilio webhook URL is reachable."""
-    configured = bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN)
+async def twilio_whatsapp_health() -> dict:
+    """Lightweight GET for verifying the webhook URL is reachable."""
     return {
         "status": "ok",
-        "twilio_configured": configured,
-        "endpoint": "/api/v1/webhooks/twilio/whatsapp",
+        "twilio_configured": bool(
+            settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN
+        ),
+        "webhook_secret_set": bool(settings.TWILIO_WEBHOOK_SECRET),
+        "endpoint": "POST /api/v1/webhooks/twilio/whatsapp",
     }
