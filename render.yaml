@@ -1,25 +1,96 @@
+# Mazi Idika — Render deployment configuration
+# Docs: https://render.com/docs/yaml-spec
+#
+# HOW TO USE
+# 1. Push this repo to GitHub / GitLab
+# 2. In Render dashboard → New → Web Service → connect your repo
+# 3. Render auto-detects this file and pre-fills build/start commands
+# 4. Set every env var marked (set in dashboard) in Render → Environment
+# 5. Click "Create Web Service"
+
 services:
   - type: web
     name: mazi-idika
     runtime: python
-    plan: free                         # Render Free tier
+    plan: free
+    region: oregon          # closest AWS region with Render Free; change to frankfurt for EU
+
+    # ── Build ────────────────────────────────────────────────────────────────
+    # Installs all dependencies listed in requirements.txt.
+    # No separate migration step — run supabase_schema.sql in Supabase SQL Editor
+    # once before first deploy (Supabase manages the database, not Render).
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+
+    # ── Start ────────────────────────────────────────────────────────────────
+    # Single worker — Render Free has a 512 MB RAM limit.
+    # $PORT is injected by Render automatically.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info
+
+    # ── Health check ─────────────────────────────────────────────────────────
     healthCheckPath: /health
+
+    # ── Environment variables ─────────────────────────────────────────────────
+    # Values marked with sync: false must be set manually in the Render dashboard.
+    # NEVER put real secrets in this file — it is committed to git.
     envVars:
+
+      # App
       - key: APP_ENV
         value: production
+
       - key: SECRET_KEY
-        generateValue: true            # Render generates a random value
-      # Set these manually in the Render dashboard (never commit secrets):
-      # DATABASE_URL
-      # TWILIO_ACCOUNT_SID
-      # TWILIO_AUTH_TOKEN
-      # TWILIO_WHATSAPP_NUMBER
-      # TWILIO_WEBHOOK_SECRET
-      # GEMINI_API_KEY
-      # OPENAI_API_KEY
-      # DEEPGRAM_API_KEY
-      # SUPABASE_URL
-      # SUPABASE_ANON_KEY
-      # SUPABASE_SERVICE_ROLE_KEY
+        generateValue: true          # Render generates a cryptographically random value
+
+      # Database — set manually in dashboard
+      # Format: postgresql+asyncpg://user:password@host:5432/dbname
+      # Supabase: use the "Transaction" pooler URL (port 5432, not 6543)
+      # Append ?ssl=require for Supabase connections from Render
+      - key: DATABASE_URL
+        sync: false                  # set in dashboard
+
+      # CORS — set to your actual frontend URL(s) in production
+      # Format: ["https://mazi.ng","https://www.mazi.ng"]
+      - key: CORS_ORIGINS
+        value: '["https://mazi.ng"]'
+
+      # Supabase — set manually in dashboard
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # Twilio — set manually in dashboard
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_NUMBER
+        sync: false
+      - key: TWILIO_WEBHOOK_SECRET
+        generateValue: true          # Render generates; copy the value into Twilio console
+
+      # Paystack — set manually in dashboard
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+
+      # Meta WhatsApp Cloud API (preserved) — set manually in dashboard
+      - key: WHATSAPP_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+
+      # AI / LLM — set manually in dashboard (at least one required)
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+      # Voice transcription — optional
+      - key: DEEPGRAM_API_KEY
+        sync: false

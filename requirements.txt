@@ -4,6 +4,8 @@
 # ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
+# FastAPI requires python-multipart to parse form-data (Twilio webhooks, file uploads)
+python-multipart==0.0.20
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy==2.0.36
@@ -29,13 +31,15 @@ python-dotenv==1.0.1
 twilio==9.3.5
 
 # ── AI / LLM ──────────────────────────────────────────────────────────────────
-google-generativeai==0.8.3        # Gemini 1.5 Flash — primary LLM
-openai==1.55.3                     # GPT-4o-mini / Whisper — fallback LLM + voice
+google-generativeai==0.8.3   # Gemini 1.5 Flash — primary LLM
+openai==1.55.3                # GPT-4o-mini / Whisper — fallback + voice
 
-# ── PDF extraction (optional — for document uploads) ─────────────────────────
-# Install only if you want PDF stock-list uploads:
+# ── PDF extraction (optional — enable for document/stock-list uploads) ────────
+# Uncomment when ready:
 # pdfplumber==0.11.4
 
 # ── Dev / testing ─────────────────────────────────────────────────────────────
+# aiosqlite is needed for the in-memory SQLite test DB
+aiosqlite==0.22.1
 pytest==8.3.3
 pytest-asyncio==0.24.0
