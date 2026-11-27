@@ -1,34 +1,41 @@
 # Mazi Idika — Python dependencies
 # Install: pip install -r requirements.txt
 
-# Web framework
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi==0.115.5
 uvicorn[standard]==0.32.1
 
-# Database
+# ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy==2.0.36
 asyncpg==0.30.0
 alembic==1.14.0
 
-# Supabase
+# ── Supabase ──────────────────────────────────────────────────────────────────
 supabase==2.10.0
 
-# Auth & security
+# ── Auth & security ───────────────────────────────────────────────────────────
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 pydantic-settings==2.6.1
 
-# HTTP client (WhatsApp API, Paystack, etc.)
+# ── HTTP client ───────────────────────────────────────────────────────────────
 httpx==0.28.0
 
-# Config / validation
+# ── Config / validation ───────────────────────────────────────────────────────
 pydantic==2.10.1
 python-dotenv==1.0.1
 
-# Payments
-# Paystack is REST-only — use httpx directly
+# ── Twilio WhatsApp ───────────────────────────────────────────────────────────
+twilio==9.3.5
 
-# Dev / testing
+# ── AI / LLM ──────────────────────────────────────────────────────────────────
+google-generativeai==0.8.3        # Gemini 1.5 Flash — primary LLM
+openai==1.55.3                     # GPT-4o-mini / Whisper — fallback LLM + voice
+
+# ── PDF extraction (optional — for document uploads) ─────────────────────────
+# Install only if you want PDF stock-list uploads:
+# pdfplumber==0.11.4
+
+# ── Dev / testing ─────────────────────────────────────────────────────────────
 pytest==8.3.3
 pytest-asyncio==0.24.0
-httpx==0.28.0

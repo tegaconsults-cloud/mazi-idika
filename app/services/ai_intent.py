@@ -1,63 +1,126 @@
-"""AI intent classifier for WhatsApp messages.
+"""AI intent classifier — keyword fallback.
 
-Classifies incoming text (English, Pidgin, Yoruba, Hausa, Igbo) into
-structured intents that the backend can act on.
+This is the last-resort classifier used when both Gemini and OpenAI are
+unavailable. The LLM-powered version is in app/services/llm.py.
 
-Phase 4 implementation — stub returns UNKNOWN until wired to LLM API.
+Intents are extended to cover all agent capabilities.
 """
 
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
 class Intent(str, Enum):
-    RECORD_SALE     = "record_sale"
-    RESTOCK         = "restock"
-    QUERY_DEBTS     = "query_debts"
-    RECORD_DEBT     = "record_debt"
-    SETTLE_DEBT     = "settle_debt"
-    QUERY_SUMMARY   = "query_summary"
-    QUERY_STOCK     = "query_stock"
-    QUERY_TOP       = "query_top_products"
-    ADD_EXPENSE     = "add_expense"
-    UNKNOWN         = "unknown"
+    # Sales
+    RECORD_SALE   = "record_sale"
+    # Inventory
+    RESTOCK       = "restock"
+    ADD_PRODUCT   = "add_product"
+    DELETE_PRODUCT= "delete_product"
+    QUERY_STOCK   = "query_stock"
+    QUERY_TOP     = "query_top"
+    QUERY_SLOW    = "query_slow"
+    # Debts
+    RECORD_DEBT   = "record_debt"
+    SETTLE_DEBT   = "settle_debt"
+    QUERY_DEBTS   = "query_debts"
+    SEND_REMINDER = "send_reminder"
+    # Reports
+    QUERY_SUMMARY = "query_summary"
+    ADD_EXPENSE   = "add_expense"
+    # Customers / suppliers
+    ADD_CUSTOMER  = "add_customer"
+    # UI
+    HELP          = "help"
+    GREETING      = "greeting"
+    UNKNOWN       = "unknown"
 
 
 @dataclass
 class ParsedIntent:
     intent: Intent
     confidence: float
-    entities: dict          # extracted values e.g. {"product": "Indomie", "qty": 5, "amount": 3500}
-    raw_text: str
-    language_detected: str  # "en" | "pcm" (Pidgin) | "yo" | "ha" | "ig"
+    entities: dict = field(default_factory=dict)
+    raw_text: str = ""
+    language_detected: str = "en"
 
 
 async def classify_intent(text: str) -> ParsedIntent:
     """
-    Classify a natural language message into a structured intent.
-
-    TODO (Phase 4):
-    1. Send text to LLM (GPT-4o / Gemini) with Nigerian market context prompt
-    2. Parse JSON response into ParsedIntent
-    3. Fall back to keyword matching for common Pidgin phrases
+    Keyword-based intent classifier.
+    Used as fallback when LLM APIs are unavailable.
+    Not a replacement for the LLM — entity extraction is minimal here.
     """
-    # Keyword fallback — extend this before Phase 4 LLM integration
-    text_lower = text.lower()
+    t = text.lower().strip()
 
-    if any(w in text_lower for w in ["sold", "sell", "ta", "ita"]):
+    # ── Greetings ────────────────────────────────────────────────────────────
+    if any(w in t for w in ["hi ", "hello", "good morning", "good afternoon", "how far"]):
+        return ParsedIntent(Intent.GREETING, 0.9, {}, text, "en")
+
+    # ── Help ─────────────────────────────────────────────────────────────────
+    if any(w in t for w in ["help", "what can you", "how to", "commands"]):
+        return ParsedIntent(Intent.HELP, 0.9, {}, text, "en")
+
+    # ── Sales ─────────────────────────────────────────────────────────────────
+    sale_words = ["sold", "sell", " ta ", "ita ", "i sell", "just sell", "customer buy"]
+    if any(w in t for w in sale_words):
         return ParsedIntent(Intent.RECORD_SALE, 0.6, {}, text, "en")
 
-    if any(w in text_lower for w in ["restock", "add", "reach", "don reach", "fi wa"]):
-        return ParsedIntent(Intent.RESTOCK, 0.6, {}, text, "pcm")
+    # ── Restock / add inventory ───────────────────────────────────────────────
+    restock_words = ["restock", "don reach", "don come", "just reach", "add stock",
+                     "new stock", "fi wa", "stock arrive", "received", "got delivery"]
+    if any(w in t for w in restock_words):
+        return ParsedIntent(Intent.RESTOCK, 0.65, {}, text, "pcm")
 
-    if any(w in text_lower for w in ["owe", "debt", "credit", "who dey", "tani", "wa jẹ"]):
-        return ParsedIntent(Intent.QUERY_DEBTS, 0.6, {}, text, "en")
+    # ── Debt queries ──────────────────────────────────────────────────────────
+    debt_query_words = ["who dey owe", "who owes", "debtors", "my debtors",
+                        "outstanding", "wa jẹ", "tani o je wa"]
+    if any(w in t for w in debt_query_words):
+        return ParsedIntent(Intent.QUERY_DEBTS, 0.7, {}, text, "en")
 
-    if any(w in text_lower for w in ["today", "summary", "report", "oni", "weekly", "monthly"]):
-        return ParsedIntent(Intent.QUERY_SUMMARY, 0.6, {}, text, "en")
+    # ── Record debt / credit sale ─────────────────────────────────────────────
+    record_debt_words = ["on credit", "credit sale", "jara", "owe me", "borrow",
+                         "buy on credit", "ya credt"]
+    if any(w in t for w in record_debt_words):
+        return ParsedIntent(Intent.RECORD_DEBT, 0.65, {}, text, "en")
 
-    if any(w in text_lower for w in ["stock", "how many", "melo", "nawa"]):
-        return ParsedIntent(Intent.QUERY_STOCK, 0.6, {}, text, "en")
+    # ── Settle debt ───────────────────────────────────────────────────────────
+    settle_words = ["paid", "don pay", "settled", "pay back", "clear debt",
+                    "settle am", "don settle"]
+    if any(w in t for w in settle_words):
+        return ParsedIntent(Intent.SETTLE_DEBT, 0.65, {}, text, "pcm")
+
+    # ── Send reminders ────────────────────────────────────────────────────────
+    if any(w in t for w in ["remind", "send reminder", "message them", "tell them"]):
+        return ParsedIntent(Intent.SEND_REMINDER, 0.7, {}, text, "en")
+
+    # ── Reports / summary ─────────────────────────────────────────────────────
+    summary_words = ["today", "summary", "report", "wetin i make", "how much i make",
+                     "weekly", "monthly", "this week", "this month", "profit", "loss"]
+    if any(w in t for w in summary_words):
+        # Detect period
+        period = "today"
+        if "week" in t:
+            period = "week"
+        elif "month" in t:
+            period = "month"
+        return ParsedIntent(Intent.QUERY_SUMMARY, 0.7, {"period": period}, text, "en")
+
+    # ── Top / slow products ───────────────────────────────────────────────────
+    if any(w in t for w in ["top product", "best seller", "top selling", "bestsell"]):
+        return ParsedIntent(Intent.QUERY_TOP, 0.75, {}, text, "en")
+    if any(w in t for w in ["slow", "slow mover", "not selling", "dead stock"]):
+        return ParsedIntent(Intent.QUERY_SLOW, 0.75, {}, text, "en")
+
+    # ── Stock query ───────────────────────────────────────────────────────────
+    stock_words = ["how many", "how much remain", "stock level", "how much dey",
+                   "quantity", "melo", "how much i get"]
+    if any(w in t for w in stock_words):
+        return ParsedIntent(Intent.QUERY_STOCK, 0.65, {}, text, "en")
+
+    # ── Expense ───────────────────────────────────────────────────────────────
+    if any(w in t for w in ["spent", "expense", "pay for", "cost me", "i buy"]):
+        return ParsedIntent(Intent.ADD_EXPENSE, 0.6, {}, text, "en")
 
     return ParsedIntent(Intent.UNKNOWN, 0.0, {}, text, "en")
